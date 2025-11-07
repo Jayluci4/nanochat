@@ -67,9 +67,12 @@ def test_batch_size(batch_size):
         # Backward
         loss.backward()
 
-        # Optimizer step
+        # Optimizer step (only if gradients exist)
         for opt in optimizers:
-            opt.step()
+            # Check if optimizer has any params with gradients
+            has_grads = any(p.grad is not None for group in opt.param_groups for p in group['params'])
+            if has_grads:
+                opt.step()
             opt.zero_grad()
 
         # Check memory
@@ -92,7 +95,7 @@ def test_batch_size(batch_size):
 
 # Binary search for max batch size
 print0("\nStarting binary search...")
-low, high = 1, 16
+low, high = 1, 4  # L4 GPUs are smaller, start with realistic range
 
 while low < high:
     mid = (low + high + 1) // 2
@@ -106,10 +109,32 @@ print0("\n" + "="*80)
 print0(f"RESULT: Maximum device_batch_size = {low}")
 print0("="*80)
 print0(f"\nUse this in your training:")
-print0(f"  --device_batch_size={low}")
-print0(f"\nGrad accumulation with 8 GPUs:")
-print0(f"  World tokens/step: {low * 1024 * 8:,}")
-print0(f"  Grad accum steps: {524288 // (low * 1024 * 8)}")
+print0(f"  torchrun --standalone --nproc_per_node=8 -m scripts.mid_train \\")
+print0(f"    --model_tag=d32 --device_batch_size={low} --max_seq_len=1024 --num_iterations=50000")
+
+# Calculate training time and cost
+world_tokens = low * 1024 * 8
+grad_accum = 524288 // world_tokens
+est_time_per_step = grad_accum * 2.5  # ~2.5 sec per micro-batch
+total_time_sec = 50000 * est_time_per_step
+total_time_hours = total_time_sec / 3600
+total_time_days = total_time_hours / 24
+cost = total_time_hours * 8 * 0.70
+
+print0(f"\nTraining estimates for 50K steps:")
+print0(f"  Grad accum steps: {grad_accum}")
+print0(f"  Time per step: ~{est_time_per_step:.0f} sec")
+print0(f"  Total time: {total_time_days:.1f} days ({total_time_hours:.0f} hours)")
+print0(f"  Estimated cost: ${cost:.0f} (8 GPUs × {total_time_hours:.0f}h × $0.70/hr)")
+
+if total_time_days > 4:
+    print0(f"\n[WARNING] Training will take {total_time_days:.1f} days!")
+    print0(f"[INFO] Consider reducing max_seq_len to 768 or 512 to increase batch_size")
+elif total_time_days > 2:
+    print0(f"\n[INFO] {total_time_days:.1f} days is acceptable for d32 scale")
+else:
+    print0(f"\n[OK] {total_time_days:.1f} days is good!")
+
 print0("="*80)
 
 compute_cleanup()
