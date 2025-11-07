@@ -1,55 +1,34 @@
 """
 Simple dataloader for chat tasks that handles tokenization.
+Uses tokenizer.render_conversation() to get proper formatting and masking.
 """
 
 import torch
 
 
-def tokenize_conversation(conversation, tokenizer, max_seq_len=2048, pad_id=-100):
+def tokenize_conversation(conversation, tokenizer, max_seq_len=2048):
     """
-    Tokenize a conversation dict into input_ids and targets.
+    Tokenize a conversation using the tokenizer's built-in method.
 
     Args:
-        conversation: Dict with 'messages' key containing list of role/content dicts
+        conversation: Dict with 'messages' key
         tokenizer: The tokenizer instance
         max_seq_len: Maximum sequence length
-        pad_id: Padding token ID (use -100 to be ignored by cross_entropy)
 
     Returns:
-        tuple: (input_ids, targets) as torch tensors
+        tuple: (ids, mask) where mask indicates which tokens to train on
     """
-    # Format conversation as text
-    text_parts = []
-    for msg in conversation['messages']:
-        role = msg['role']
-        content = msg['content']
+    # Use tokenizer's built-in render_conversation method
+    # This handles proper special tokens and masking
+    ids, mask = tokenizer.render_conversation(conversation, max_tokens=max_seq_len)
 
-        if role == 'user':
-            text_parts.append(f"<|user|>{content}<|end|>")
-        elif role == 'assistant':
-            text_parts.append(f"<|assistant|>{content}<|end|>")
-
-    full_text = ''.join(text_parts)
-
-    # Tokenize
-    tokens = tokenizer.encode(full_text)
-
-    # Truncate if too long
-    if len(tokens) > max_seq_len:
-        tokens = tokens[:max_seq_len]
-
-    # Convert to tensor
-    input_ids = torch.tensor(tokens, dtype=torch.long)
-
-    # Targets are same as inputs (next token prediction)
-    targets = input_ids.clone()
-
-    return input_ids, targets
+    return ids, mask
 
 
 def collate_conversations(batch, tokenizer, max_seq_len=2048, device='cuda'):
     """
     Collate a batch of conversations into padded tensors.
+    Uses the mask from render_conversation to only train on assistant responses.
 
     Args:
         batch: List of conversation dicts
@@ -64,33 +43,42 @@ def collate_conversations(batch, tokenizer, max_seq_len=2048, device='cuda'):
     if isinstance(batch, dict):
         batch = [batch]
 
-    # Tokenize all conversations
+    # Tokenize all conversations (returns ids and mask)
     tokenized = [tokenize_conversation(conv, tokenizer, max_seq_len) for conv in batch]
 
-    # Always pad to max_seq_len for consistent tensor shapes
-    # This is critical for torch.compile and gradient accumulation
-    max_len = max_seq_len
+    # Get pad token from tokenizer
+    pad_token_id = tokenizer.encode_special("<|assistant_end|>")
 
-    # Padding IDs
-    input_pad_id = 0    # Pad input with 0 (or use actual pad token if available)
-    target_pad_id = -100  # Pad targets with -100 (ignored by cross_entropy)
+    # Find max length (usually all will be max_seq_len, but handle edge cases)
+    max_len = max(len(ids) for ids, mask in tokenized)
 
     input_ids_list = []
     targets_list = []
 
-    for ids, tgts in tokenized:
-        seq_len = len(ids)
+    for ids, mask in tokenized:
+        n = len(ids)
 
-        # Pad inputs with 0
-        input_padding = torch.full((max_len - seq_len,), input_pad_id, dtype=torch.long)
-        padded_ids = torch.cat([ids, input_padding])
+        # Convert to tensors
+        ids_tensor = torch.tensor(ids, dtype=torch.long)
+        mask_tensor = torch.tensor(mask, dtype=torch.long)
 
-        # Pad targets with -100 (ignored by PyTorch's cross_entropy)
-        target_padding = torch.full((max_len - seq_len,), target_pad_id, dtype=torch.long)
-        padded_tgts = torch.cat([tgts, target_padding])
+        # Create inputs and targets (shift by 1 for autoregressive)
+        # inputs: [:-1] (all but last)
+        # targets: [1:] (all but first), masked where mask==0
+        inputs = torch.full((max_len,), pad_token_id, dtype=torch.long)
+        targets = torch.full((max_len,), -1, dtype=torch.long)  # -1 = ignore in loss
 
-        input_ids_list.append(padded_ids)
-        targets_list.append(padded_tgts)
+        # Fill in the actual sequence (shifted)
+        inputs[:n-1] = ids_tensor[:-1]
+
+        # Targets are next tokens, but masked by the conversation mask
+        target_ids = ids_tensor[1:]
+        target_mask = mask_tensor[1:]  # Mask is also shifted
+        target_ids[target_mask == 0] = -1  # Ignore where mask is 0
+        targets[:n-1] = target_ids
+
+        input_ids_list.append(inputs)
+        targets_list.append(targets)
 
     # Stack into batch
     input_ids = torch.stack(input_ids_list).to(device)

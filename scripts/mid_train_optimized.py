@@ -228,37 +228,33 @@ while step < num_iterations:
             train_iter = iter(train_dataset)
             batch = next(train_iter)
 
-        # Tokenize conversation
+        # Tokenize conversation (uses tokenizer.render_conversation internally)
+        # Returns properly shifted inputs/targets with masking
         input_ids, targets = collate_conversations(batch, tokenizer, max_seq_len, device)
-
-        # Shift targets for autoregressive training
-        # Input:  [A, B, C, D, E]
-        # Target: [B, C, D, E, PAD] where we predict next token
-        targets = torch.cat([input_ids[:, 1:], torch.full((input_ids.size(0), 1), -100, dtype=torch.long, device=device)], dim=1)
 
         # Forward pass
         if master_process and step == 0 and micro_step == 0:
             print0(f"\n[DEBUG] Forward pass - input shape: {input_ids.shape}")
             print0(f"[DEBUG] Targets shape: {targets.shape}")
 
-            # Count real vs padding tokens
-            real_tokens = (targets[0] != -100).sum().item()
-            pad_tokens = (targets[0] == -100).sum().item()
-            print0(f"[DEBUG] Real tokens: {real_tokens}, Padding tokens: {pad_tokens}")
+            # Count tokens to train on vs ignore
+            train_tokens = (targets[0] != -1).sum().item()
+            ignore_tokens = (targets[0] == -1).sum().item()
+            print0(f"[DEBUG] Tokens to train on: {train_tokens}, Ignored tokens: {ignore_tokens}")
 
-            print0(f"[DEBUG] Sample tokens (first 30): {input_ids[0, :30].tolist()}")
+            print0(f"[DEBUG] Sample inputs (first 30): {input_ids[0, :30].tolist()}")
             print0(f"[DEBUG] Sample targets (first 30): {targets[0, :30].tolist()}")
-            print0(f"[DEBUG] Decoded input: {tokenizer.decode(input_ids[0, :30].tolist())}")
+            print0(f"[DEBUG] Decoded input (first 100 chars): {tokenizer.decode(input_ids[0, :30].tolist())}")
 
         with autocast_ctx:
             logits = model(input_ids)
 
-            # Compute cross-entropy loss (ignore_index=-100 by default)
+            # Compute cross-entropy loss (ignore_index=-1 to match nanochat convention)
             loss = torch.nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 reduction='mean',
-                ignore_index=-100  # Explicitly set to ignore padding
+                ignore_index=-1  # -1 means ignore (user prompts + padding)
             )
             loss = loss / grad_accum_steps  # Scale loss for accumulation
 
