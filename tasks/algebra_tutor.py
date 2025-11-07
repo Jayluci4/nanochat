@@ -38,6 +38,7 @@ class AlgebraTutor(Task):
         # Required attributes for Task base class
         self.start = 0
         self.stop = self.size
+        self.step = 1  # Required by Task base class for indexing
         self._index = 0
     # Diverse ways users might phrase algebra questions
     # This variation helps the model generalize to different phrasings
@@ -134,6 +135,23 @@ My final answer is:
     def __len__(self):
         """Return the size of the dataset for TaskMixture."""
         return self.size
+
+    def __getitem__(self, index):
+        """
+        Get item by index (for random access).
+        Generates a new random problem each time.
+        """
+        # Generate a random problem (index doesn't matter, always random)
+        equation, a, b, c, x_actual = self.generate_problem()
+        user_prompt = random.choice(self.USER_PROMPTS).format(equation=equation)
+        assistant_response = self.generate_solution(equation, a, b, c, x_actual)
+
+        return {
+            "messages": [
+                {"role": "user", "content": user_prompt},
+                {"role": "assistant", "content": assistant_response}
+            ]
+        }
 
     def __iter__(self):
         """Initialize iterator."""
