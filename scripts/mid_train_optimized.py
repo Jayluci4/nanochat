@@ -133,11 +133,23 @@ else:
 # Setup data
 tokens_per_fwdbwd = device_batch_size * max_seq_len
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
+
+# For validation runs, use smaller batch size to make steps faster
+if num_iterations <= 1000:
+    total_batch_size = min(total_batch_size, world_tokens_per_fwdbwd * 4)  # Max 4 accum steps for validation
+    print0(f"[INFO] Validation mode: reducing total_batch_size to {total_batch_size:,}")
+
 assert total_batch_size % world_tokens_per_fwdbwd == 0
 grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 
 print0(f"Tokens/batch/rank:   {tokens_per_fwdbwd:,}")
+print0(f"World tokens/step:   {world_tokens_per_fwdbwd:,}")
+print0(f"Total batch size:    {total_batch_size:,}")
 print0(f"Grad accum steps:    {grad_accum_steps}")
+print0(f"Micro-batches per step: {grad_accum_steps} forward/backward passes")
+if grad_accum_steps > 16:
+    print0(f"[WARNING] High grad accumulation! Each step = {grad_accum_steps} micro-batches")
+    print0(f"[WARNING] Expected time per step: ~{grad_accum_steps * 2:.0f} seconds")
 
 # Create task mixture
 print0("Creating task mixture...")
@@ -248,8 +260,15 @@ while step < num_iterations:
     if master_process and step % 10 != 0:
         print(".", end="", flush=True)
 
+    # Show micro-batch progress for slow steps
+    if master_process and grad_accum_steps > 8 and step < 3:
+        print(f"\n[Step {step}] Processing {grad_accum_steps} micro-batches: ", end="", flush=True)
+
     # Gradient accumulation loop
     for micro_step in range(grad_accum_steps):
+        # Show progress every 8 micro-batches for visibility
+        if master_process and grad_accum_steps > 8 and micro_step % 8 == 0 and step < 3:
+            print(f"{micro_step}/{grad_accum_steps}..", end="", flush=True)
         # Get batch (conversation dict)
         try:
             batch = next(train_iter)

@@ -55,11 +55,20 @@ def wrap_model_fsdp(model, device_id=None):
         FSDP-wrapped model
     """
 
-    # Auto-wrap policy: wrap each transformer block
-    # This gives good granularity for sharding
-    auto_wrap_policy = ModuleWrapPolicy(
-        {torch.nn.TransformerEncoderLayer, torch.nn.TransformerDecoderLayer}
-    )
+    # Import the actual Block class from nanochat's GPT
+    # Can't use standard TransformerEncoderLayer - nanochat has custom architecture
+    try:
+        from nanochat.gpt import Block
+        wrap_class = Block
+    except:
+        # Fallback: no auto-wrap, just wrap the whole model
+        wrap_class = None
+
+    # Auto-wrap policy: wrap each Block (nanochat's transformer layer)
+    if wrap_class is not None:
+        auto_wrap_policy = ModuleWrapPolicy({wrap_class})
+    else:
+        auto_wrap_policy = None
 
     fsdp_config = get_fsdp_config()
 
