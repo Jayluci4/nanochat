@@ -231,6 +231,11 @@ while step < num_iterations:
         # Tokenize conversation
         input_ids, targets = collate_conversations(batch, tokenizer, max_seq_len, device)
 
+        # Shift targets for autoregressive training
+        # Input:  [A, B, C, D, E]
+        # Target: [B, C, D, E, PAD] where we predict next token
+        targets = torch.cat([input_ids[:, 1:], torch.full((input_ids.size(0), 1), -100, dtype=torch.long, device=device)], dim=1)
+
         # Forward pass
         if master_process and step == 0 and micro_step == 0:
             print0(f"\n[DEBUG] Forward pass - input shape: {input_ids.shape}")
