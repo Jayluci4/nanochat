@@ -24,10 +24,11 @@ echo "  Memory strategy: Checkpointing + FSDP"
 echo ""
 
 # Run validation with torchrun (required for multi-GPU FSDP)
+# Use -m flag to ensure Python finds modules correctly
 torchrun \
   --standalone \
   --nproc_per_node=$NPROC \
-  scripts/mid_train_optimized.py \
+  -m scripts.mid_train_optimized \
   --model_tag=$MODEL_TAG \
   --device_batch_size=$DEVICE_BATCH_SIZE \
   --max_seq_len=$MAX_SEQ_LEN \
