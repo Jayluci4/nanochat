@@ -111,9 +111,13 @@ if use_fsdp and ddp:
     from nanochat.fsdp_utils import wrap_model_fsdp
     orig_model = wrap_model_fsdp(orig_model, device_id=ddp_local_rank)
 
-# Compile model
-print0("Compiling model...")
-model = torch.compile(orig_model, dynamic=False)
+# Compile model (skip if using checkpointing - they're incompatible)
+if use_checkpointing:
+    print0("Skipping torch.compile (incompatible with gradient checkpointing)")
+    model = orig_model
+else:
+    print0("Compiling model...")
+    model = torch.compile(orig_model, dynamic=False)
 
 # Setup data
 tokens_per_fwdbwd = device_batch_size * max_seq_len

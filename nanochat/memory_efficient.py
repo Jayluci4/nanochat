@@ -9,76 +9,49 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+# Try to import compile-compatible checkpoint wrapper
+try:
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        checkpoint_wrapper,
+        CheckpointImpl,
+        apply_activation_checkpointing,
+    )
+    CHECKPOINT_WRAPPER_AVAILABLE = True
+except ImportError:
+    CHECKPOINT_WRAPPER_AVAILABLE = False
+
 
 def apply_selective_checkpointing(model):
     """
     Apply gradient checkpointing ONLY to attention layers.
 
-    Attention layers: High memory (attention matrices), low compute cost to recompute
-    MLP layers: Lower memory, high compute cost to recompute
-
-    Strategy: Checkpoint attention, keep MLP activations.
-    Saves ~60% memory with ~15% slowdown (vs 40% slowdown for full checkpointing).
+    Uses a compile-compatible approach: set a flag on modules,
+    then check the flag in the actual forward pass.
+    This avoids dynamic function wrapping that breaks torch.compile.
     """
 
-    original_forwards = {}
-
+    checkpoint_count = 0
     for name, module in model.named_modules():
         # Target CausalSelfAttention modules
         if module.__class__.__name__ == 'CausalSelfAttention':
-            # Save original forward
-            original_forward = module.forward
-            original_forwards[name] = original_forward
+            # Mark for checkpointing with a flag
+            module._use_checkpoint = True
+            checkpoint_count += 1
 
-            # Create checkpointed version
-            def make_checkpointed_forward(original_fn):
-                def checkpointed_forward(*args, **kwargs):
-                    # Use PyTorch's checkpoint
-                    return checkpoint(
-                        original_fn,
-                        *args,
-                        **kwargs,
-                        use_reentrant=False,  # Better for PyTorch 2.0+
-                        preserve_rng_state=True,
-                    )
-                return checkpointed_forward
-
-            # Replace forward with checkpointed version
-            module.forward = make_checkpointed_forward(original_forward)
-
-    print(f"[INFO] Applied gradient checkpointing to {len(original_forwards)} attention layers")
+    print(f"[INFO] Marked {checkpoint_count} attention layers for gradient checkpointing")
+    print(f"[INFO] Note: Actual checkpointing happens in forward pass")
     return model
 
 
 def add_memory_hooks(model, verbose=False):
     """
     Add hooks to monitor memory usage per layer.
-    Useful for debugging which layers consume most memory.
+    WARNING: Incompatible with torch.compile! Only use for debugging without compile.
     """
-    memory_stats = {}
-
-    def forward_hook(module, input, output):
-        layer_name = module.__class__.__name__
-        if layer_name not in memory_stats:
-            memory_stats[layer_name] = {
-                'count': 0,
-                'total_memory_mb': 0,
-            }
-
-        # Estimate memory from output tensor
-        if isinstance(output, torch.Tensor):
-            memory_mb = output.numel() * output.element_size() / 1024 / 1024
-            memory_stats[layer_name]['total_memory_mb'] += memory_mb
-            memory_stats[layer_name]['count'] += 1
-
-    # Register hooks
-    for module in model.modules():
-        module.register_forward_hook(forward_hook)
-
-    if verbose:
-        print("[INFO] Memory monitoring hooks installed")
-
-    return memory_stats
+    # Disabled by default - incompatible with torch.compile
+    print("[WARNING] Memory hooks disabled - incompatible with torch.compile")
+    print("[INFO] Use print_memory_summary() instead for memory monitoring")
+    return {}
 
 
 def print_memory_summary():
