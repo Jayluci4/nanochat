@@ -38,8 +38,9 @@ for module in model.modules():
         original_fwd = module.forward
         module.forward = lambda *args, **kwargs: checkpoint(original_fwd, *args, **kwargs, use_reentrant=False)
 
-# Create optimizer
-optimizers = model.setup_optimizers(unembedding_lr=0.2, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0)
+# Create simple AdamW optimizer (avoid Muon's strict gradient requirements)
+print0("Creating AdamW optimizer for testing...")
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.02, weight_decay=0.0)
 
 max_seq_len = 1024
 
@@ -67,13 +68,10 @@ def test_batch_size(batch_size):
         # Backward
         loss.backward()
 
-        # Optimizer step (only if gradients exist)
-        for opt in optimizers:
-            # Check if optimizer has any params with gradients
-            has_grads = any(p.grad is not None for group in opt.param_groups for p in group['params'])
-            if has_grads:
-                opt.step()
-            opt.zero_grad()
+        # Optimizer step
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        optimizer.zero_grad()
 
         # Check memory
         peak_memory = torch.cuda.max_memory_allocated() / 1024**3
