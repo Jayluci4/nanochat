@@ -27,6 +27,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, g
 from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.loss_eval import evaluate_bpb
+from nanochat.chat_dataloader import collate_conversations
 
 # Memory optimization imports
 from nanochat.lowrank_optim import create_lowrank_optimizer
@@ -186,16 +187,25 @@ while step < num_iterations:
 
     # Gradient accumulation loop
     for micro_step in range(grad_accum_steps):
-        # Get batch
+        # Get batch (conversation dict)
         try:
             batch = next(train_iter)
         except StopIteration:
             train_iter = iter(train_dataset)
             batch = next(train_iter)
 
+        # Tokenize conversation
+        input_ids, targets = collate_conversations(batch, tokenizer, max_seq_len, device)
+
         # Forward pass
         with autocast_ctx:
-            loss = model(batch)
+            logits = model(input_ids)
+            # Compute cross-entropy loss
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                reduction='mean'
+            )
             loss = loss / grad_accum_steps  # Scale loss for accumulation
 
         # Backward pass
