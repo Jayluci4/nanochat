@@ -8,7 +8,7 @@ echo "========================================================"
 echo ""
 
 # Configuration
-NPROC=1  # Start with single GPU for testing
+NPROC=8  # Use all 8 GPUs for FSDP sharding
 MODEL_TAG="d32"
 DEVICE_BATCH_SIZE=1
 MAX_SEQ_LEN=1024
@@ -20,18 +20,21 @@ echo "  Model: $MODEL_TAG"
 echo "  Sequence length: $MAX_SEQ_LEN"
 echo "  Batch size: $DEVICE_BATCH_SIZE"
 echo "  Steps: $NUM_ITERATIONS"
+echo "  Memory strategy: Checkpointing + FSDP"
 echo ""
 
-# Run validation
-python -m scripts.mid_train_optimized \
+# Run validation with torchrun (required for multi-GPU FSDP)
+torchrun \
+  --standalone \
+  --nproc_per_node=$NPROC \
+  scripts/mid_train_optimized.py \
   --model_tag=$MODEL_TAG \
   --device_batch_size=$DEVICE_BATCH_SIZE \
   --max_seq_len=$MAX_SEQ_LEN \
   --num_iterations=$NUM_ITERATIONS \
-  --use_lowrank_optim=True \
+  --use_lowrank_optim=False \
   --use_checkpointing=True \
-  --use_fsdp=False \
-  --monitor_memory=True
+  --use_fsdp=True
 
 echo ""
 echo "========================================================"

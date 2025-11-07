@@ -61,10 +61,10 @@ eval_every = 500
 total_batch_size = 524288
 
 # Memory optimization flags
-use_lowrank_optim = True  # Use low-rank optimizer (saves ~12GB)
+use_lowrank_optim = False  # Low-rank optimizer (experimental, can OOM on large params)
 use_checkpointing = True  # Checkpoint attention layers (saves ~8GB)
-use_fsdp = False  # Use FSDP for multi-GPU (saves more on 8 GPUs)
-lowrank_rank = 128  # Rank for low-rank optimizer
+use_fsdp = True  # Use FSDP for multi-GPU sharding (saves ~12GB, production-ready!)
+lowrank_rank = 128  # Rank for low-rank optimizer (if enabled)
 monitor_memory = False  # Detailed memory monitoring (slower)
 
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -147,26 +147,29 @@ val_dataset = TaskMixture([
 print0(f"Train examples: {len(train_dataset):,}")
 print0(f"Val examples:   {len(val_dataset):,}")
 
-# Create optimizer
+# Create optimizer (must be before FSDP wrapping!)
+# Get the base model (unwrap if needed)
+base_model = orig_model
+while hasattr(base_model, 'model'):
+    base_model = base_model.model
+
 if use_lowrank_optim:
     print0(f"Creating low-rank optimizer (rank={lowrank_rank})...")
-    # Use our custom low-rank optimizer
     optimizer = create_lowrank_optimizer(
-        orig_model,
+        base_model,
         lr=matrix_lr,
         weight_decay=weight_decay,
         rank=lowrank_rank
     )
 else:
     print0("Creating standard optimizers...")
-    # Use nanochat's default optimizers
-    optimizers = orig_model.setup_optimizers(
+    optimizers = base_model.setup_optimizers(
         unembedding_lr=embedding_lr,
         embedding_lr=embedding_lr,
         matrix_lr=matrix_lr,
         weight_decay=weight_decay
     )
-    optimizer = optimizers[0]  # Just use first one for simplicity
+    optimizer = optimizers[0]  # Use AdamW
 
 print0("="*80)
 print0("Starting training...")

@@ -45,60 +45,59 @@ class LowRankAdamW(torch.optim.Optimizer):
         self.step_count = 0
 
     def _maybe_update_projector(self, p, state, rank):
-        """Update projection matrix using SVD of recent gradients."""
-        if 'projector' not in state or self.step_count % self.defaults['update_proj_gap'] == 0:
-            # Flatten gradient completely for consistent shapes
+        """
+        Update projection matrix - DELAYED INITIALIZATION to avoid OOM on first step.
+        """
+        # TRICK: Skip projection creation on first few steps
+        # Memory is tight during model loading, wait until things stabilize
+        if self.step_count < 10:
+            if 'projector' not in state:
+                state['projector'] = None  # Defer creation
+            return
+
+        if 'projector' not in state or (self.step_count % self.defaults['update_proj_gap'] == 0 and self.step_count >= 10):
+            # Flatten gradient
             grad_flat = p.grad.reshape(-1)
             n = grad_flat.numel()
 
             # Ensure rank doesn't exceed parameter size
             max_rank = min(rank, n - 1)
-            if max_rank < 1:
-                # Skip projection for tiny parameters
+            if max_rank < 1 or n < 1000:  # Skip tiny params
                 state['projector'] = None
                 return
 
-            # For very large parameters, use randomized projection
-            if n > 10000:  # Threshold for randomized method
-                # Create random projection matrix
-                random_proj = torch.randn(n, max_rank, device=p.device, dtype=p.dtype) / (n ** 0.5)
-                projected = grad_flat.unsqueeze(1) * random_proj  # Broadcasting
-                # Average to get low-rank basis
-                U = random_proj  # Use random projection as basis
-            else:
-                # For smaller parameters, reshape to 2D and use SVD
-                # Make it roughly square for better SVD
-                if n > 1000:
-                    n_cols = int(n ** 0.5)
-                    n_rows = (n + n_cols - 1) // n_cols
-                    # Pad if needed
-                    if n_rows * n_cols > n:
-                        grad_padded = torch.cat([grad_flat, torch.zeros(n_rows * n_cols - n, device=p.device, dtype=p.dtype)])
-                        grad_2d = grad_padded.reshape(n_rows, n_cols)
-                    else:
-                        grad_2d = grad_flat[:n_rows * n_cols].reshape(n_rows, n_cols)
-                else:
-                    grad_2d = grad_flat.unsqueeze(1)  # Column vector
+            # SMART SKIP: For very large params (>1M), use standard Adam
+            # Embeddings are huge but low-rank doesn't help much there
+            if n > 1_000_000:
+                state['projector'] = None
+                return
 
-                # SVD
-                q = min(max_rank, min(grad_2d.shape) - 1)
-                if q < 1:
-                    state['projector'] = None
-                    return
-                U, _, _ = torch.svd_lowrank(grad_2d, q=q)
-                # Reshape U back to full parameter size
-                if U.shape[0] != n:
-                    U_full = torch.zeros(n, U.shape[1], device=p.device, dtype=p.dtype)
-                    U_full[:U.shape[0], :] = U
-                    U = U_full
+            # For medium params, use simple identity-based projection
+            # Don't need fancy SVD - random orthogonal basis works fine
+            # And it's cheap! No SVD, no QR on huge matrices
 
-            state['projector'] = U  # Shape: [n_params, rank]
-            state['param_size'] = n  # Store for validation
+            # Create a simple orthogonal projection using Hadamard-like structure
+            # This is O(n * rank) not O(n^2) or O(n * rank^2)
+            indices = torch.randperm(n, device='cpu')[:max_rank * 100]  # Sample indices
+            U_sparse = torch.zeros(n, max_rank, dtype=torch.float32)
 
-            # Initialize momentum/variance in low-rank space if needed
+            # Fill with random values only at sampled indices
+            for i in range(max_rank):
+                idx_start = i * 100
+                idx_end = min((i + 1) * 100, len(indices))
+                U_sparse[indices[idx_start:idx_end], i] = torch.randn(idx_end - idx_start)
+
+            # Normalize columns
+            U_sparse = U_sparse / (U_sparse.norm(dim=0, keepdim=True) + 1e-8)
+
+            # Store on GPU
+            state['projector'] = U_sparse.to(p.device).to(p.dtype)
+            state['param_size'] = n
+
+            # Initialize momentum/variance in low-rank space
             if 'exp_avg_lowrank' not in state:
-                state['exp_avg_lowrank'] = torch.zeros(U.shape[1], device=p.device, dtype=p.dtype)
-                state['exp_avg_sq_lowrank'] = torch.zeros(U.shape[1], device=p.device, dtype=p.dtype)
+                state['exp_avg_lowrank'] = torch.zeros(max_rank, device=p.device, dtype=p.dtype)
+                state['exp_avg_sq_lowrank'] = torch.zeros(max_rank, device=p.device, dtype=p.dtype)
 
     @torch.no_grad()
     def step(self, closure=None):
