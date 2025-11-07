@@ -29,13 +29,16 @@ class AlgebraTutor(Task):
     def __init__(self, size=None, split=None):
         """
         Args:
-            size: Number of examples to generate (ignored, generates infinite)
+            size: Number of examples to generate (for TaskMixture compatibility)
             split: train/test (ignored for synthetic data)
         """
         # These parameters are for API compatibility with other tasks
-        # AlgebraTutor generates infinite synthetic data, so we ignore them
-        self.size = size
+        self.size = size if size is not None else 200000
         self.split = split
+        # Required attributes for Task base class
+        self.start = 0
+        self.stop = self.size
+        self._index = 0
     # Diverse ways users might phrase algebra questions
     # This variation helps the model generalize to different phrasings
     USER_PROMPTS = [
@@ -128,62 +131,73 @@ My final answer is:
         
         return solution
     
+    def __len__(self):
+        """Return the size of the dataset for TaskMixture."""
+        return self.size
+
     def __iter__(self):
+        """Initialize iterator."""
+        self._index = 0
+        return self
+
+    def __next__(self):
         """
-        Generate an infinite stream of algebra problems.
-        
+        Generate next algebra problem.
+
         This is the interface required by the Task base class.
         The training loop will call this iterator and take as many examples
         as needed for training.
-        
-        Yields:
+
+        Returns:
             dict: A conversation in nanochat format with 'messages' key
         """
-        while True:
-            # Generate a new random problem
-            equation, a, b, c, x_actual = self.generate_problem()
-            
-            # Choose a random prompt format for diversity
-            user_prompt = random.choice(self.USER_PROMPTS).format(equation=equation)
-            
-            # Generate the step-by-step solution
-            assistant_response = self.generate_solution(equation, a, b, c, x_actual)
-            
-            # Yield in the standard nanochat conversation format
-            yield {
-                "messages": [
-                    {"role": "user", "content": user_prompt},
-                    {"role": "assistant", "content": assistant_response}
-                ]
-            }
+        # Check if we've reached the size limit
+        if self.size is not None and self._index >= self.size:
+            raise StopIteration
+
+        self._index += 1
+
+        # Generate a new random problem
+        equation, a, b, c, x_actual = self.generate_problem()
+
+        # Choose a random prompt format for diversity
+        user_prompt = random.choice(self.USER_PROMPTS).format(equation=equation)
+
+        # Generate the step-by-step solution
+        assistant_response = self.generate_solution(equation, a, b, c, x_actual)
+
+        # Return in the standard nanochat conversation format
+        return {
+            "messages": [
+                {"role": "user", "content": user_prompt},
+                {"role": "assistant", "content": assistant_response}
+            ]
+        }
 
 
 # For testing: Run this file directly to see example outputs
 if __name__ == "__main__":
-    task = AlgebraTutor()
-    
+    task = AlgebraTutor(size=5)
+
     print("="*80)
     print("AlgebraTutor - Example Outputs")
     print("="*80)
     print()
-    
+
     # Generate and display 5 example problems
     for i, example in enumerate(task):
-        if i >= 5:
-            break
-        
         print(f"\n{'='*80}")
         print(f"Example {i+1}:")
         print(f"{'='*80}")
         print(f"\nUser: {example['messages'][0]['content']}")
         print(f"\nAssistant:\n{example['messages'][1]['content']}")
         print()
-    
+
     print("="*80)
     print("Test complete. The outputs above should show:")
-    print("  ✓ Varied equation formats")
-    print("  ✓ Different prompt phrasings")
-    print("  ✓ Consistent step-by-step solutions")
-    print("  ✓ Proper <|python_start|> ... <|python_end|> format")
-    print("  ✓ Correct final answers with #### prefix")
+    print("  [OK] Varied equation formats")
+    print("  [OK] Different prompt phrasings")
+    print("  [OK] Consistent step-by-step solutions")
+    print("  [OK] Proper <|python_start|> ... <|python_end|> format")
+    print("  [OK] Correct final answers with #### prefix")
     print("="*80)
