@@ -179,12 +179,38 @@ tokens_seen = 0
 # Create data iterator
 train_iter = iter(train_dataset)
 
+# Track loss moving average
+from collections import deque
+loss_history = deque(maxlen=50)  # Last 50 steps for moving average
+
 # Memory baseline (before training)
 if master_process and torch.cuda.is_available():
     torch.cuda.synchronize()
     print0("\nMemory BEFORE first step:")
     print_memory_summary()
     print0("")
+
+# Verify model is actually loaded (not random init)
+if master_process:
+    print0("\n" + "="*80)
+    print0("MODEL VERIFICATION")
+    print0("="*80)
+    # Check a few parameter values
+    sample_param = None
+    for name, param in model.named_parameters():
+        if 'wte' in name:  # Token embedding
+            sample_param = param
+            param_mean = param.data.abs().mean().item()
+            param_std = param.data.std().item()
+            print0(f"Sample param '{name}':")
+            print0(f"  Mean abs value: {param_mean:.6f}")
+            print0(f"  Std dev: {param_std:.6f}")
+            if param_mean < 0.001:
+                print0(f"  [WARNING] Parameters look uninitialized!")
+            else:
+                print0(f"  [OK] Parameters look trained")
+            break
+    print0("="*80 + "\n")
 
 while step < num_iterations:
     step_start_time = time.time()
@@ -206,8 +232,10 @@ while step < num_iterations:
         input_ids, targets = collate_conversations(batch, tokenizer, max_seq_len, device)
 
         # Forward pass
-        if master_process and step == 0:
+        if master_process and step == 0 and micro_step == 0:
             print0(f"\n[DEBUG] Forward pass - input shape: {input_ids.shape}")
+            print0(f"[DEBUG] Sample tokens (first 20): {input_ids[0, :20].tolist()}")
+            print0(f"[DEBUG] Decoded text (first 100 chars): {tokenizer.decode(input_ids[0, :20].tolist())[:100]}")
 
         with autocast_ctx:
             logits = model(input_ids)
@@ -219,8 +247,16 @@ while step < num_iterations:
             )
             loss = loss / grad_accum_steps  # Scale loss for accumulation
 
-        if master_process and step == 0:
-            print0(f"[DEBUG] Loss computed: {loss.item()*grad_accum_steps:.4f}")
+        if master_process and step == 0 and micro_step == 0:
+            print0(f"[DEBUG] Logits shape: {logits.shape}")
+            print0(f"[DEBUG] Loss (scaled): {loss.item():.4f}")
+            print0(f"[DEBUG] Loss (actual): {loss.item()*grad_accum_steps:.4f}")
+            print0(f"[DEBUG] Vocab size: {logits.size(-1)}")
+
+            # Sanity check
+            random_loss = torch.log(torch.tensor(float(logits.size(-1))))
+            print0(f"[DEBUG] Random baseline loss: {random_loss.item():.4f}")
+            print0(f"[DEBUG] Status: {'[WARNING] Model looks random!' if loss.item()*grad_accum_steps > random_loss.item() else '[OK] Model is trained'}")
 
         # Backward pass
         loss.backward()
@@ -234,9 +270,20 @@ while step < num_iterations:
     step_time = time.time() - step_start_time
     tokens_seen += total_batch_size
 
+    # Track loss for moving average
+    current_loss = loss.item() * grad_accum_steps
+    loss_history.append(current_loss)
+
     if step % 10 == 0 and master_process:
         print("")  # New line after dots
-        print0(f"step {step:5d} | loss {loss.item()*grad_accum_steps:.4f} | "
+
+        # Compute moving average
+        avg_loss = sum(loss_history) / len(loss_history) if loss_history else current_loss
+        min_loss = min(loss_history) if loss_history else current_loss
+        max_loss = max(loss_history) if loss_history else current_loss
+
+        print0(f"step {step:5d} | "
+               f"loss {current_loss:.4f} (avg {avg_loss:.4f}, range [{min_loss:.2f}, {max_loss:.2f}]) | "
                f"dt {step_time*1000:.0f}ms | tok/sec {total_batch_size/step_time:.0f}")
 
     # Memory check (first step and every 100 steps)
@@ -269,6 +316,62 @@ while step < num_iterations:
 print0("="*80)
 print0("Training complete!")
 print0("="*80)
+
+# Final diagnostics
+if master_process:
+    print0("\n" + "="*80)
+    print0("TRAINING SUMMARY")
+    print0("="*80)
+
+    if loss_history:
+        final_avg = sum(loss_history) / len(loss_history)
+        first_losses = list(loss_history)[:10]
+        last_losses = list(loss_history)[-10:]
+        first_avg = sum(first_losses) / len(first_losses) if first_losses else 0
+        last_avg = sum(last_losses) / len(last_losses) if last_losses else 0
+
+        print0(f"Loss statistics (last 50 steps):")
+        print0(f"  First 10 steps avg: {first_avg:.4f}")
+        print0(f"  Last 10 steps avg:  {last_avg:.4f}")
+        print0(f"  Overall avg:        {final_avg:.4f}")
+        print0(f"  Min loss:           {min(loss_history):.4f}")
+        print0(f"  Max loss:           {max(loss_history):.4f}")
+
+        # Convergence check
+        improvement = first_avg - last_avg
+        print0(f"\nConvergence check:")
+        print0(f"  Improvement: {improvement:.4f}")
+
+        if improvement > 0.5:
+            print0(f"  Status: [OK] Loss is decreasing - model is learning!")
+        elif improvement > 0:
+            print0(f"  Status: [OK] Slight improvement - normal for short runs")
+        elif abs(improvement) < 0.5:
+            print0(f"  Status: [WARNING] Loss not decreasing yet")
+            print0(f"          This is normal for <1000 steps, continue training")
+        else:
+            print0(f"  Status: [ERROR] Loss increasing - check hyperparameters!")
+
+        # Model readiness check
+        if last_avg > 15:
+            print0(f"\n[CRITICAL] Loss is very high ({last_avg:.2f})")
+            print0(f"Expected: Pre-trained d32 should start at ~3-4 loss")
+            print0(f"Actual: Starting at ~{first_avg:.2f}")
+            print0(f"\nPossible causes:")
+            print0(f"  1. Model not loaded correctly (check checkpoint path)")
+            print0(f"  2. Tokenization is wrong (check token format)")
+            print0(f"  3. Loss computation has bugs (check targets)")
+            print0(f"  4. Learning rate too high (check optimizer config)")
+            print0(f"\nDO NOT run full 50K training until this is fixed!")
+        elif last_avg > 8:
+            print0(f"\n[WARNING] Loss higher than expected ({last_avg:.2f})")
+            print0(f"This might be normal for new task mixture")
+            print0(f"Monitor first 1K steps before committing to full run")
+        else:
+            print0(f"\n[OK] Loss in expected range ({last_avg:.2f})")
+            print0(f"Safe to proceed with full training")
+
+    print0("="*80)
 
 # Final memory summary
 if master_process and torch.cuda.is_available():
