@@ -71,7 +71,30 @@ pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
 orig_model = model
-model = torch.compile(model, dynamic=False)
+
+# MEMORY OPTIMIZATION: Add selective gradient checkpointing
+if device_batch_size <= 2:  # Only use checkpointing for tight memory situations
+    print0("Applying gradient checkpointing to attention layers (saves ~8GB)...")
+    from torch.utils.checkpoint import checkpoint
+
+    checkpoint_count = 0
+    for name, module in model.named_modules():
+        if module.__class__.__name__ == 'CausalSelfAttention':
+            original_forward = module.forward
+
+            def make_checkpointed(fwd):
+                def checkpointed_fwd(*args, **kwargs):
+                    return checkpoint(fwd, *args, **kwargs, use_reentrant=False)
+                return checkpointed_fwd
+
+            module.forward = make_checkpointed(original_forward)
+            checkpoint_count += 1
+
+    print0(f"Checkpointed {checkpoint_count} attention layers")
+    print0("Skipping torch.compile (incompatible with checkpointing)")
+    # Skip compile when checkpointing
+else:
+    model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = device_batch_size * max_seq_len # tokens per iteration for a single rank
