@@ -234,16 +234,26 @@ while step < num_iterations:
         # Forward pass
         if master_process and step == 0 and micro_step == 0:
             print0(f"\n[DEBUG] Forward pass - input shape: {input_ids.shape}")
-            print0(f"[DEBUG] Sample tokens (first 20): {input_ids[0, :20].tolist()}")
-            print0(f"[DEBUG] Decoded text (first 100 chars): {tokenizer.decode(input_ids[0, :20].tolist())[:100]}")
+            print0(f"[DEBUG] Targets shape: {targets.shape}")
+
+            # Count real vs padding tokens
+            real_tokens = (targets[0] != -100).sum().item()
+            pad_tokens = (targets[0] == -100).sum().item()
+            print0(f"[DEBUG] Real tokens: {real_tokens}, Padding tokens: {pad_tokens}")
+
+            print0(f"[DEBUG] Sample tokens (first 30): {input_ids[0, :30].tolist()}")
+            print0(f"[DEBUG] Sample targets (first 30): {targets[0, :30].tolist()}")
+            print0(f"[DEBUG] Decoded input: {tokenizer.decode(input_ids[0, :30].tolist())}")
 
         with autocast_ctx:
             logits = model(input_ids)
-            # Compute cross-entropy loss
+
+            # Compute cross-entropy loss (ignore_index=-100 by default)
             loss = torch.nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
-                reduction='mean'
+                reduction='mean',
+                ignore_index=-100  # Explicitly set to ignore padding
             )
             loss = loss / grad_accum_steps  # Scale loss for accumulation
 
@@ -253,10 +263,26 @@ while step < num_iterations:
             print0(f"[DEBUG] Loss (actual): {loss.item()*grad_accum_steps:.4f}")
             print0(f"[DEBUG] Vocab size: {logits.size(-1)}")
 
-            # Sanity check
+            # Sanity checks
             random_loss = torch.log(torch.tensor(float(logits.size(-1))))
             print0(f"[DEBUG] Random baseline loss: {random_loss.item():.4f}")
-            print0(f"[DEBUG] Status: {'[WARNING] Model looks random!' if loss.item()*grad_accum_steps > random_loss.item() else '[OK] Model is trained'}")
+
+            # Check model predictions
+            with torch.no_grad():
+                probs = torch.softmax(logits[0, 0, :], dim=-1)
+                top5_probs, top5_tokens = probs.topk(5)
+                print0(f"[DEBUG] Top 5 predicted tokens for position 0:")
+                for i, (tok, prob) in enumerate(zip(top5_tokens.tolist(), top5_probs.tolist())):
+                    decoded = tokenizer.decode([tok])
+                    print0(f"         {i+1}. Token {tok:5d} ({decoded[:20]:20s}) = {prob:.4f}")
+
+            # Status
+            if loss.item()*grad_accum_steps > random_loss.item():
+                print0(f"[DEBUG] Status: [WARNING] Model worse than random! Check tokenization!")
+            elif loss.item()*grad_accum_steps > 8:
+                print0(f"[DEBUG] Status: [WARNING] Loss high but better than random")
+            else:
+                print0(f"[DEBUG] Status: [OK] Model is trained properly")
 
         # Backward pass
         loss.backward()
