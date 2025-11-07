@@ -5,7 +5,7 @@ Simple dataloader for chat tasks that handles tokenization.
 import torch
 
 
-def tokenize_conversation(conversation, tokenizer, max_seq_len=2048):
+def tokenize_conversation(conversation, tokenizer, max_seq_len=2048, pad_id=-100):
     """
     Tokenize a conversation dict into input_ids and targets.
 
@@ -13,6 +13,7 @@ def tokenize_conversation(conversation, tokenizer, max_seq_len=2048):
         conversation: Dict with 'messages' key containing list of role/content dicts
         tokenizer: The tokenizer instance
         max_seq_len: Maximum sequence length
+        pad_id: Padding token ID (use -100 to be ignored by cross_entropy)
 
     Returns:
         tuple: (input_ids, targets) as torch tensors
@@ -70,17 +71,23 @@ def collate_conversations(batch, tokenizer, max_seq_len=2048, device='cuda'):
     # This is critical for torch.compile and gradient accumulation
     max_len = max_seq_len
 
-    # Pad to max length
-    pad_id = 0  # Assuming 0 is padding
+    # Padding IDs
+    input_pad_id = 0    # Pad input with 0 (or use actual pad token if available)
+    target_pad_id = -100  # Pad targets with -100 (ignored by cross_entropy)
 
     input_ids_list = []
     targets_list = []
 
     for ids, tgts in tokenized:
-        # Pad
-        padding = torch.full((max_len - len(ids),), pad_id, dtype=torch.long)
-        padded_ids = torch.cat([ids, padding])
-        padded_tgts = torch.cat([tgts, padding])
+        seq_len = len(ids)
+
+        # Pad inputs with 0
+        input_padding = torch.full((max_len - seq_len,), input_pad_id, dtype=torch.long)
+        padded_ids = torch.cat([ids, input_padding])
+
+        # Pad targets with -100 (ignored by PyTorch's cross_entropy)
+        target_padding = torch.full((max_len - seq_len,), target_pad_id, dtype=torch.long)
+        padded_tgts = torch.cat([tgts, target_padding])
 
         input_ids_list.append(padded_ids)
         targets_list.append(padded_tgts)
