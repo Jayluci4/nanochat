@@ -66,8 +66,9 @@ def collate_conversations(batch, tokenizer, max_seq_len=2048, device='cuda'):
     # Tokenize all conversations
     tokenized = [tokenize_conversation(conv, tokenizer, max_seq_len) for conv in batch]
 
-    # Find max length in batch
-    max_len = max(len(ids) for ids, _ in tokenized)
+    # Always pad to max_seq_len for consistent tensor shapes
+    # This is critical for torch.compile and gradient accumulation
+    max_len = max_seq_len
 
     # Pad to max length
     pad_id = 0  # Assuming 0 is padding

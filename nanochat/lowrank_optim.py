@@ -47,32 +47,53 @@ class LowRankAdamW(torch.optim.Optimizer):
     def _maybe_update_projector(self, p, state, rank):
         """Update projection matrix using SVD of recent gradients."""
         if 'projector' not in state or self.step_count % self.defaults['update_proj_gap'] == 0:
-            # Compute low-rank approximation of gradient
-            grad_2d = p.grad.reshape(-1, 1) if p.grad.dim() == 1 else p.grad.reshape(p.grad.shape[0], -1)
+            # Flatten gradient completely for consistent shapes
+            grad_flat = p.grad.reshape(-1)
+            n = grad_flat.numel()
 
-            # Ensure rank doesn't exceed matrix dimensions
-            max_rank = min(rank, min(grad_2d.shape) - 1)
+            # Ensure rank doesn't exceed parameter size
+            max_rank = min(rank, n - 1)
             if max_rank < 1:
-                # Skip projection for tiny matrices
+                # Skip projection for tiny parameters
                 state['projector'] = None
                 return
 
-            # For very wide matrices, use randomized SVD approximation
-            if grad_2d.shape[1] > rank * 4:
-                # Simple randomized approximation
-                random_proj = torch.randn(grad_2d.shape[1], max_rank, device=grad_2d.device, dtype=grad_2d.dtype)
-                projected = grad_2d @ random_proj
-                # Ensure q doesn't exceed projected dimensions
-                q = min(max_rank, min(projected.shape) - 1)
+            # For very large parameters, use randomized projection
+            if n > 10000:  # Threshold for randomized method
+                # Create random projection matrix
+                random_proj = torch.randn(n, max_rank, device=p.device, dtype=p.dtype) / (n ** 0.5)
+                projected = grad_flat.unsqueeze(1) * random_proj  # Broadcasting
+                # Average to get low-rank basis
+                U = random_proj  # Use random projection as basis
+            else:
+                # For smaller parameters, reshape to 2D and use SVD
+                # Make it roughly square for better SVD
+                if n > 1000:
+                    n_cols = int(n ** 0.5)
+                    n_rows = (n + n_cols - 1) // n_cols
+                    # Pad if needed
+                    if n_rows * n_cols > n:
+                        grad_padded = torch.cat([grad_flat, torch.zeros(n_rows * n_cols - n, device=p.device, dtype=p.dtype)])
+                        grad_2d = grad_padded.reshape(n_rows, n_cols)
+                    else:
+                        grad_2d = grad_flat[:n_rows * n_cols].reshape(n_rows, n_cols)
+                else:
+                    grad_2d = grad_flat.unsqueeze(1)  # Column vector
+
+                # SVD
+                q = min(max_rank, min(grad_2d.shape) - 1)
                 if q < 1:
                     state['projector'] = None
                     return
-                U, _, _ = torch.svd_lowrank(projected, q=q)
-            else:
-                # Use PyTorch's low-rank SVD
-                U, _, _ = torch.svd_lowrank(grad_2d, q=max_rank)
+                U, _, _ = torch.svd_lowrank(grad_2d, q=q)
+                # Reshape U back to full parameter size
+                if U.shape[0] != n:
+                    U_full = torch.zeros(n, U.shape[1], device=p.device, dtype=p.dtype)
+                    U_full[:U.shape[0], :] = U
+                    U = U_full
 
-            state['projector'] = U  # Shape: [param_size, rank]
+            state['projector'] = U  # Shape: [n_params, rank]
+            state['param_size'] = n  # Store for validation
 
             # Initialize momentum/variance in low-rank space if needed
             if 'exp_avg_lowrank' not in state:
@@ -143,6 +164,25 @@ class LowRankAdamW(torch.optim.Optimizer):
                         # Project gradient to low-rank space
                         grad_flat = grad.reshape(-1)
                         projector = state['projector']
+
+                        # Validate shapes match
+                        if projector.shape[0] != grad_flat.shape[0]:
+                            # Parameter size changed or projector corrupted, recreate
+                            state.pop('projector', None)
+                            self._maybe_update_projector(p, state, rank)
+                            if state.get('projector') is None:
+                                # Fallback to standard Adam
+                                if 'exp_avg' not in state:
+                                    state['exp_avg'] = torch.zeros_like(p)
+                                    state['exp_avg_sq'] = torch.zeros_like(p)
+                                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                                denom = exp_avg_sq.sqrt().add_(group['eps'])
+                                p.addcdiv_(exp_avg, denom, value=-group['lr'])
+                                continue
+                            projector = state['projector']
+
                         grad_lowrank = projector.T @ grad_flat  # Shape: [rank]
 
                         # Update momentum and variance in low-rank space
