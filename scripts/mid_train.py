@@ -8,7 +8,7 @@ Or torchrun for training:
 
 torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- --device_batch_size=16
 """
-
+from tasks.algebra_tutor import AlgebraTutor
 from collections import deque
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -96,14 +96,16 @@ for opt in optimizers:
 base_dir = get_base_dir()
 identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
 train_dataset = TaskMixture([
-    SmolTalk(split="train"), # 460K rows of general conversations
-    MMLU(subset="auxiliary_train", split="train"), # 100K rows of multiple choice problems drawn from ARC, MC_TEST, OBQA, RACE
-    GSM8K(subset="main", split="train"), # 8K rows teaching simple math and (calculator) tool use
-    CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
-    CustomJSON(filepath=identity_conversations_filepath), # let's do 2 epochs of these
-    SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-    SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
-]) # total: 460K + 100K + 8K + 200K + 80K = 848K rows
+    AlgebraTutor(size=200000, split="train"),    # 200K rows (40%) - NEW: algebra + tool use
+    SmolTalk(split="train", stop=200000),        # 200K rows (40%) - preserve conversation
+    MMLU(subset="auxiliary_train", split="train", stop=50000),  # 50K rows (10%) - preserve knowledge
+    GSM8K(subset="main", split="train"),         # 8K rows - keep all of it for reinforcement
+    SpellingBee(size=20000, split="train"),      # 20K rows (4%) - reinforce tool use pattern
+    # Note: GSM8K is ~8K total, we use all of it which is ~1.6% of mixture
+    # CustomJSON removed to focus on our core tasks
+    # SimpleSpelling removed (covered by SpellingBee)
+]) # total: 200K + 200K + 50K + 8K + 20K = 478K rows
+
 val_dataset = TaskMixture([
     SmolTalk(split="test"), # 24K rows in test set
     MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
