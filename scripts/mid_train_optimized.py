@@ -189,6 +189,10 @@ if master_process and torch.cuda.is_available():
 while step < num_iterations:
     step_start_time = time.time()
 
+    # Show progress indicator every step (dots for silence)
+    if master_process and step % 10 != 0:
+        print(".", end="", flush=True)
+
     # Gradient accumulation loop
     for micro_step in range(grad_accum_steps):
         # Get batch (conversation dict)
@@ -202,6 +206,9 @@ while step < num_iterations:
         input_ids, targets = collate_conversations(batch, tokenizer, max_seq_len, device)
 
         # Forward pass
+        if master_process and step == 0:
+            print0(f"\n[DEBUG] Forward pass - input shape: {input_ids.shape}")
+
         with autocast_ctx:
             logits = model(input_ids)
             # Compute cross-entropy loss
@@ -211,6 +218,9 @@ while step < num_iterations:
                 reduction='mean'
             )
             loss = loss / grad_accum_steps  # Scale loss for accumulation
+
+        if master_process and step == 0:
+            print0(f"[DEBUG] Loss computed: {loss.item()*grad_accum_steps:.4f}")
 
         # Backward pass
         loss.backward()
@@ -225,6 +235,7 @@ while step < num_iterations:
     tokens_seen += total_batch_size
 
     if step % 10 == 0 and master_process:
+        print("")  # New line after dots
         print0(f"step {step:5d} | loss {loss.item()*grad_accum_steps:.4f} | "
                f"dt {step_time*1000:.0f}ms | tok/sec {total_batch_size/step_time:.0f}")
 

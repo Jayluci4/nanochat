@@ -50,15 +50,27 @@ class LowRankAdamW(torch.optim.Optimizer):
             # Compute low-rank approximation of gradient
             grad_2d = p.grad.reshape(-1, 1) if p.grad.dim() == 1 else p.grad.reshape(p.grad.shape[0], -1)
 
+            # Ensure rank doesn't exceed matrix dimensions
+            max_rank = min(rank, min(grad_2d.shape) - 1)
+            if max_rank < 1:
+                # Skip projection for tiny matrices
+                state['projector'] = None
+                return
+
             # For very wide matrices, use randomized SVD approximation
             if grad_2d.shape[1] > rank * 4:
                 # Simple randomized approximation
-                random_proj = torch.randn(grad_2d.shape[1], rank, device=grad_2d.device, dtype=grad_2d.dtype)
+                random_proj = torch.randn(grad_2d.shape[1], max_rank, device=grad_2d.device, dtype=grad_2d.dtype)
                 projected = grad_2d @ random_proj
-                U, _, _ = torch.svd_lowrank(projected, q=rank)
+                # Ensure q doesn't exceed projected dimensions
+                q = min(max_rank, min(projected.shape) - 1)
+                if q < 1:
+                    state['projector'] = None
+                    return
+                U, _, _ = torch.svd_lowrank(projected, q=q)
             else:
                 # Use PyTorch's low-rank SVD
-                U, _, _ = torch.svd_lowrank(grad_2d, q=min(rank, min(grad_2d.shape) - 1))
+                U, _, _ = torch.svd_lowrank(grad_2d, q=max_rank)
 
             state['projector'] = U  # Shape: [param_size, rank]
 
@@ -112,27 +124,43 @@ class LowRankAdamW(torch.optim.Optimizer):
                     # Low-rank Adam for large parameters
                     self._maybe_update_projector(p, state, rank)
 
-                    # Project gradient to low-rank space
-                    grad_flat = grad.reshape(-1)
-                    projector = state['projector']
-                    grad_lowrank = projector.T @ grad_flat  # Shape: [rank]
+                    # Check if projection succeeded
+                    if state.get('projector') is None:
+                        # Fall back to standard Adam if projection failed
+                        if 'exp_avg' not in state:
+                            state['exp_avg'] = torch.zeros_like(p)
+                            state['exp_avg_sq'] = torch.zeros_like(p)
 
-                    # Update momentum and variance in low-rank space
-                    exp_avg_lr = state['exp_avg_lowrank']
-                    exp_avg_sq_lr = state['exp_avg_sq_lowrank']
+                        exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                        exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                    exp_avg_lr.mul_(beta1).add_(grad_lowrank, alpha=1 - beta1)
-                    exp_avg_sq_lr.mul_(beta2).addcmul_(grad_lowrank, grad_lowrank, value=1 - beta2)
+                        denom = exp_avg_sq.sqrt().add_(group['eps'])
+                        step_size = group['lr']
 
-                    # Compute update in low-rank space
-                    denom_lr = exp_avg_sq_lr.sqrt().add_(group['eps'])
-                    update_lowrank = exp_avg_lr / denom_lr
+                        p.addcdiv_(exp_avg, denom, value=-step_size)
+                    else:
+                        # Project gradient to low-rank space
+                        grad_flat = grad.reshape(-1)
+                        projector = state['projector']
+                        grad_lowrank = projector.T @ grad_flat  # Shape: [rank]
 
-                    # Project back to full space
-                    update_full = projector @ update_lowrank
+                        # Update momentum and variance in low-rank space
+                        exp_avg_lr = state['exp_avg_lowrank']
+                        exp_avg_sq_lr = state['exp_avg_sq_lowrank']
 
-                    # Apply update
-                    p.add_(update_full.reshape(p.shape), alpha=-group['lr'])
+                        exp_avg_lr.mul_(beta1).add_(grad_lowrank, alpha=1 - beta1)
+                        exp_avg_sq_lr.mul_(beta2).addcmul_(grad_lowrank, grad_lowrank, value=1 - beta2)
+
+                        # Compute update in low-rank space
+                        denom_lr = exp_avg_sq_lr.sqrt().add_(group['eps'])
+                        update_lowrank = exp_avg_lr / denom_lr
+
+                        # Project back to full space
+                        update_full = projector @ update_lowrank
+
+                        # Apply update
+                        p.add_(update_full.reshape(p.shape), alpha=-group['lr'])
 
         return loss
 
