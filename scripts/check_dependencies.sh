@@ -137,6 +137,28 @@ if [ -d ".venv" ]; then
 fi
 echo ""
 
+echo "9. Checking rustbpe Tokenizer Build"
+echo "------------------------------------"
+if [ -f "rustbpe/target/release/librustbpe.so" ] || [ -f "rustbpe/target/release/librustbpe.dylib" ]; then
+    echo "✅ rustbpe tokenizer is built"
+else
+    echo "⚠️  rustbpe tokenizer not built yet"
+    echo "   Building now (this takes 2-3 minutes)..."
+    
+    cd rustbpe
+    cargo build --release
+    
+    if [ $? -eq 0 ]; then
+        cd ..
+        echo "✅ rustbpe built successfully"
+    else
+        cd ..
+        echo "❌ rustbpe build failed"
+        EXIT_CODE=1
+    fi
+fi
+echo ""
+
 echo "5. Checking AlgebraTutor Task"
 echo "------------------------------"
 if [ -f "tasks/algebra_tutor.py" ]; then
