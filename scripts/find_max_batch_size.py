@@ -1,10 +1,17 @@
 """
 Automatically find the maximum device_batch_size that fits in memory.
 Uses binary search with checkpointing enabled.
+
+Run as: python -m scripts.find_max_batch_size
 """
 
 import torch
 import sys
+import os
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from nanochat.common import compute_init, compute_cleanup, autodetect_device_type, print0
 from nanochat.checkpoint_manager import load_model
 from torch.utils.checkpoint import checkpoint
