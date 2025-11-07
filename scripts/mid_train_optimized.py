@@ -108,6 +108,18 @@ if use_checkpointing or monitor_memory:
 # FSDP wrapping (must be before compile)
 if use_fsdp and ddp:
     print0("Wrapping with FSDP for distributed training...")
+
+    # Fix mixed dtypes - convert all params to bfloat16
+    print0("Converting all parameters to bfloat16...")
+    for param in orig_model.parameters():
+        if param.dtype != torch.bfloat16:
+            param.data = param.data.to(torch.bfloat16)
+
+    # Also convert buffers (like running stats)
+    for buffer in orig_model.buffers():
+        if buffer.dtype != torch.bfloat16:
+            buffer.data = buffer.data.to(torch.bfloat16)
+
     from nanochat.fsdp_utils import wrap_model_fsdp
     orig_model = wrap_model_fsdp(orig_model, device_id=ddp_local_rank)
 
