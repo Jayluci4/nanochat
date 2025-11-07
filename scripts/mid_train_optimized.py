@@ -96,40 +96,39 @@ print0("Loading model...")
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=model_tag, step=step)
 orig_model = model
 
+# Fix mixed dtypes BEFORE any wrapping
+print0("Converting all parameters to bfloat16...")
+for param in model.parameters():
+    if param.dtype != torch.bfloat16:
+        param.data = param.data.to(torch.bfloat16)
+for buffer in model.buffers():
+    if buffer.dtype != torch.bfloat16:
+        buffer.data = buffer.data.to(torch.bfloat16)
+
 # Wrap with memory optimizations
 if use_checkpointing or monitor_memory:
     print0("Wrapping model with memory optimizations...")
     orig_model = MemoryEfficientWrapper(
-        orig_model,
+        model,
         use_checkpointing=use_checkpointing,
         monitor_memory=monitor_memory
     )
+else:
+    orig_model = model
 
-# FSDP wrapping (must be before compile)
+# FSDP wrapping (must be before compile and before optimizer!)
 if use_fsdp and ddp:
     print0("Wrapping with FSDP for distributed training...")
-
-    # Fix mixed dtypes - convert all params to bfloat16
-    print0("Converting all parameters to bfloat16...")
-    for param in orig_model.parameters():
-        if param.dtype != torch.bfloat16:
-            param.data = param.data.to(torch.bfloat16)
-
-    # Also convert buffers (like running stats)
-    for buffer in orig_model.buffers():
-        if buffer.dtype != torch.bfloat16:
-            buffer.data = buffer.data.to(torch.bfloat16)
-
     from nanochat.fsdp_utils import wrap_model_fsdp
     orig_model = wrap_model_fsdp(orig_model, device_id=ddp_local_rank)
 
 # Compile model (skip if using checkpointing - they're incompatible)
 if use_checkpointing:
     print0("Skipping torch.compile (incompatible with gradient checkpointing)")
-    model = orig_model
+    model_compiled = orig_model
 else:
     print0("Compiling model...")
-    model = torch.compile(orig_model, dynamic=False)
+    model_compiled = torch.compile(orig_model, dynamic=False)
 
 # Setup data
 tokens_per_fwdbwd = device_batch_size * max_seq_len
@@ -159,13 +158,23 @@ val_dataset = TaskMixture([
 print0(f"Train examples: {len(train_dataset):,}")
 print0(f"Val examples:   {len(val_dataset):,}")
 
-# Create optimizer (must be before FSDP wrapping!)
-# Get the base model (unwrap if needed)
-base_model = orig_model
-while hasattr(base_model, 'model'):
-    base_model = base_model.model
+# Create optimizer AFTER FSDP (FSDP changes param structure)
+# Get params from the wrapped model
+if use_fsdp and ddp:
+    # For FSDP, use simple AdamW (Muon doesn't work with FSDP's flattened params)
+    print0("Creating AdamW optimizer for FSDP...")
+    optimizer = torch.optim.AdamW(
+        orig_model.parameters(),
+        lr=matrix_lr,
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999),
+    )
+elif use_lowrank_optim:
+    # Get the base model (unwrap if needed)
+    base_model = orig_model
+    while hasattr(base_model, 'model'):
+        base_model = base_model.model
 
-if use_lowrank_optim:
     print0(f"Creating low-rank optimizer (rank={lowrank_rank})...")
     optimizer = create_lowrank_optimizer(
         base_model,
@@ -174,14 +183,19 @@ if use_lowrank_optim:
         rank=lowrank_rank
     )
 else:
-    print0("Creating standard optimizers...")
+    # Get the base model (unwrap if needed)
+    base_model = orig_model
+    while hasattr(base_model, 'model'):
+        base_model = base_model.model
+
+    print0("Creating standard optimizers (AdamW + Muon)...")
     optimizers = base_model.setup_optimizers(
         unembedding_lr=embedding_lr,
         embedding_lr=embedding_lr,
         matrix_lr=matrix_lr,
         weight_decay=weight_decay
     )
-    optimizer = optimizers[0]  # Use AdamW
+    optimizer = optimizers[0]  # Use AdamW (Muon is second)
 
 print0("="*80)
 print0("Starting training...")
@@ -212,7 +226,7 @@ if master_process:
     print0("="*80)
     # Check a few parameter values
     sample_param = None
-    for name, param in model.named_parameters():
+    for name, param in model_compiled.named_parameters():
         if 'wte' in name:  # Token embedding
             sample_param = param
             param_mean = param.data.abs().mean().item()
@@ -262,7 +276,7 @@ while step < num_iterations:
             print0(f"[DEBUG] Decoded input (first 100 chars): {tokenizer.decode(input_ids[0, :30].tolist())}")
 
         with autocast_ctx:
-            logits = model(input_ids)
+            logits = model_compiled(input_ids)
 
             # Compute cross-entropy loss (ignore_index=-1 to match nanochat convention)
             loss = torch.nn.functional.cross_entropy(
@@ -304,7 +318,7 @@ while step < num_iterations:
         loss.backward()
 
     # Optimizer step
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(orig_model.parameters(), 1.0)
     optimizer.step()
     optimizer.zero_grad()
 
